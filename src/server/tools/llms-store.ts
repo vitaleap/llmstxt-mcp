@@ -259,6 +259,22 @@ export const llmsStore = {
       return config.llms[index]
     })
   },
+  async getByUrl(url: string) {
+    const config = await readConfig()
+    let origin: string
+    try {
+      origin = new URL(url).origin
+    } catch {
+      return undefined
+    }
+    return config.llms.find((item) => {
+      try {
+        return new URL(item.url).origin === origin
+      } catch {
+        return false
+      }
+    })
+  },
   getDoc(id: string) {
     return withLock(async () => {
       const config = await readConfig()

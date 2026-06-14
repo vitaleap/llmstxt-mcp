@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { llmsStore } from './llms-store.js'
+import { fetchTextCached } from '../utils/http.js'
+import { resolveDocLinks } from '../utils/index.js'
 
 const jsonTextResult = (data: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(data) }],
@@ -75,10 +77,10 @@ export const registerTools = (server: McpServer) => {
   )
 
   server.registerTool(
-    'view_content',
+    'view',
     {
       description:
-        "Read the content of a stored llms.txt document by id. Call `list` first if you don't have the id.",
+        "Read the content of a stored llms.txt document by id. The returned text contains absolute URLs that can be fetched via `view_doc`. Call `list` first if you don't have the id.",
       inputSchema: {
         id: z.uuid().describe('llms id'),
       },
@@ -86,6 +88,36 @@ export const registerTools = (server: McpServer) => {
     async ({ id }) => {
       const result = await llmsStore.getDoc(id)
       return jsonTextResult(result)
+    },
+  )
+
+  server.registerTool(
+    'view_doc',
+    {
+      description:
+        'Fetch a document content linked from a stored llms.txt by its absolute URL. Typically called with a URL discovered via `view`.',
+      inputSchema: {
+        docUrl: z
+          .url()
+          .refine(
+            (value) => {
+              try {
+                const protocol = new URL(value).protocol
+                return protocol === 'http:' || protocol === 'https:'
+              } catch {
+                return false
+              }
+            },
+            { message: 'docUrl must be an http(s) URL' },
+          )
+          .describe('Absolute URL of the document to fetch'),
+      },
+    },
+    async ({ docUrl }) => {
+      const docStr = await fetchTextCached(docUrl)
+      return jsonTextResult({
+        docContent: resolveDocLinks(docStr, docUrl),
+      })
     },
   )
 }
