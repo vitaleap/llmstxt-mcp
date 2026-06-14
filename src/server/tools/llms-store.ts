@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   globalSettingsSchema,
@@ -9,7 +9,7 @@ import {
   type LlmsConfig,
   type LlmsItem,
 } from '../types/index.js'
-import { assertUnique, buildProxyAgent, resolveDocLinks } from '../utils/index.js'
+import { assertUnique, fetchDocTextCached, resolveDocLinks } from '../utils/index.js'
 
 const baseDir = join(homedir(), '.llmstxt-mcp')
 const configPath = join(baseDir, 'config.json')
@@ -78,8 +78,6 @@ const writeConfig = async (config: LlmsConfig) => {
   await writeJson(configPath, config)
 }
 
-const getDocPath = (id: string) => join(baseDir, id, 'llms.txt')
-
 const findItemIndex = (config: LlmsConfig, id: string) => {
   const index = config.llms.findIndex((entry) => entry.id === id)
   if (index === -1) {
@@ -88,22 +86,15 @@ const findItemIndex = (config: LlmsConfig, id: string) => {
   return index
 }
 
-const fetchDocText = async (url: string) => {
-  const dispatcher = buildProxyAgent()
-  // `dispatcher` is an undici extension to RequestInit, not part of the
-  // standard DOM fetch type — cast around it so callers stay typed.
-  const init = dispatcher ? ({ dispatcher } as RequestInit) : undefined
-  const response = await fetch(url, init)
-  if (!response.ok) {
-    throw new Error(`failed to fetch document: ${response.status} ${response.statusText}`)
-  }
-
-  const text = await response.text()
-  if (!text.trim()) {
-    throw new Error('fetched document is empty')
-  }
-
-  return text
+/**
+ * Fetch the source document for `item.url` through the on-disk URL cache
+ * (see `utils/http.ts`). On a successful refresh, `item.updateTime` is set
+ * to the current time so callers can reason about the freshness of the
+ * item without having to inspect the cache.
+ */
+const syncItemDocument = async (item: LlmsItem) => {
+  await fetchDocTextCached(item.url)
+  item.updateTime = now()
 }
 
 /**
@@ -117,39 +108,6 @@ const withLock = <T>(fn: () => Promise<T>): Promise<T> => {
   const next = lockChain.then(fn, fn)
   lockChain = next.catch(() => {})
   return next
-}
-
-/**
- * Fetch the source document for `item.url` and persist it under
- * `~/.llmstxt-mcp/<id>/llms.txt`. Sets `item.updateTime` on success.
- *
- * Synchronous from the caller's perspective: throws on failure (after
- * best-effort cleanup of the doc dir); never leaves a half-written state
- * in config.json.
- */
-const syncItemDocument = async (item: LlmsItem) => {
-  const docPath = getDocPath(item.id)
-  try {
-    const text = await fetchDocText(item.url)
-    await mkdir(dirname(docPath), { recursive: true })
-    await writeFile(docPath, text, 'utf8')
-    item.updateTime = now()
-    return text
-  } catch (error) {
-    try {
-      await rm(dirname(docPath), { recursive: true, force: true })
-    } catch (cleanupError) {
-      // Best-effort cleanup: never let a rm failure replace the original
-      // fetch error. Log and continue so the caller still sees the real
-      // root cause.
-      console.warn(
-        `llmstxt-mcp: failed to remove ${dirname(docPath)} after fetch error:`,
-        cleanupError,
-      )
-    }
-
-    throw error
-  }
 }
 
 const getRefreshTtlMs = (config: LlmsConfig): number => {
@@ -249,12 +207,10 @@ export const llmsStore = {
       const config = await readConfig()
       const index = findItemIndex(config, id)
       const [removed] = config.llms.splice(index, 1)
-
-      // Persist config first; if the write fails the doc dir stays around
-      // (cheap orphan) but config never references a missing file. If the
-      // rm fails after the write, the next refresh will rewrite the doc.
+      // Cache files are shared across items by URL, so we deliberately
+      // leave them in place; another entry pointing at the same URL still
+      // needs them, and stale entries are bounded by the 3-day TTL.
       await writeConfig(config)
-      await rm(dirname(getDocPath(id)), { recursive: true, force: true })
       return removed
     })
   },
@@ -286,10 +242,10 @@ export const llmsStore = {
         await refreshItem(config, item)
       }
 
-      const raw = await readFile(getDocPath(id), 'utf8')
+      const text = await fetchDocTextCached(item.url)
       return {
         item,
-        content: resolveDocLinks(raw, item.url),
+        content: resolveDocLinks(text, item.url),
       }
     })
   },

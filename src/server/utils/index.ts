@@ -3,6 +3,8 @@ import { uniqBy } from 'es-toolkit/array'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import type { LlmsItem } from '../types/index.js'
 
+export { fetchDocTextCached } from './http.js'
+
 /**
  * Captured snapshot of proxy-related environment variables at module load.
  * Filters out unset entries so callers can pass the result straight through
